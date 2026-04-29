@@ -47,21 +47,20 @@ El servicio es operado y mantenido por Bluesky Social, PBC. Para más informaci�
 
 #### Diccionario de datos
 
-
-| Atributo                 | Definición Técnica                                          | Tipo de dato          |
-| :----------------------- | :---------------------------------------------------------- | :-------------------- |
-| `did`                    | Identificador descentralizado del repositorio del usuario.  | Cualitativo (ID)      |
-| `time_us`                | Marca de tiempo en microsegundos UNIX del evento.           | Serie temporal        |
-| `kind`                   | Tipo de evento (commit, identity, account).                 | Cualitativo           |
-| `commit`                 | Objeto que contiene los detalles del evento.                | Objeto                |
-| `commit.operation`       | Acción realizada (create, update, delete).                  | Cualitativo           |
-| `commit.collection`      | NSID de la colección (ej. app.bsky.feed.post).              | Cualitativo           |
-| `commit.rkey`            | Clave del registro dentro de la colección.                  | Cualitativo           |
-| `commit.record`          | Registro del evento.                                        | Objeto                |
-| `commit.record.text`     | Contenido de texto del post (si aplica).                    | Texto estructurado   |
-| `commit.record.createdAt`| Fecha de creación del registro en formato ISO 8601.         | Serie temporal        |
-| `commit.record.subject.uri`| Referencia al post original (en caso de likes/reposts).   | Cualitativo (URI)     |
-| `seq`                    | Número de secuencia para ordenamiento de eventos (en identity/account) | Cuantitativo          |
+| Atributo                    | Definición Técnica                                                     | Tipo de dato       |
+| :-------------------------- | :--------------------------------------------------------------------- | :----------------- |
+| `did`                       | Identificador descentralizado del repositorio del usuario.             | Cualitativo (ID)   |
+| `time_us`                   | Marca de tiempo en microsegundos UNIX del evento.                      | Serie temporal     |
+| `kind`                      | Tipo de evento (commit, identity, account).                            | Cualitativo        |
+| `commit`                    | Objeto que contiene los detalles del evento.                           | Objeto             |
+| `commit.operation`          | Acción realizada (create, update, delete).                             | Cualitativo        |
+| `commit.collection`         | NSID de la colección (ej. app.bsky.feed.post).                         | Cualitativo        |
+| `commit.rkey`               | Clave del registro dentro de la colección.                             | Cualitativo        |
+| `commit.record`             | Registro del evento.                                                   | Objeto             |
+| `commit.record.text`        | Contenido de texto del post (si aplica).                               | Texto estructurado |
+| `commit.record.createdAt`   | Fecha de creación del registro en formato ISO 8601.                    | Serie temporal     |
+| `commit.record.subject.uri` | Referencia al post original (en caso de likes/reposts).                | Cualitativo (URI)  |
+| `seq`                       | Número de secuencia para ordenamiento de eventos (en identity/account) | Cuantitativo       |
 
 #### Variables cuantitativas
 
@@ -148,3 +147,27 @@ Cumpliendo con las directrices de control de accesos, las credenciales del clús
 1. Crear un archivo `.env` en la raíz basado en el `.env.example`
 2. Activar el entorno virtual e instalar dependencias (`pip install -r requirements.txt`)
 3. Ejecutar el orquestador `python proyecto_ingesta.ipynb` (o desde el notebook proporcionado).
+
+### Infraestructura y Configuración
+
+La arquitectura base del proyecto se despliega mediante Docker Compose, conformando un clúster distribuido de Apache Cassandra de 3 nodos para garantizar alta disponibilidad, balanceo de carga y tolerancia a fallos.
+
+#### Topología de Red y Conectividad (VPN)
+
+Para asegurar un acceso estable y simular un entorno controlado, los contenedores exponen sus servicios a través de una IP fija proveída por una VPN (`10.15.20.24`). El tráfico y la comunicación se segmentaron estratégicamente en tres capas:
+
+- **Comunicación Cliente-Nodo (RPC):** El script consumidor (escrito en Python) interactúa de forma asíncrona y concurrente con los nodos a través de los puertos de transporte nativo (`9041`, `9042` y `9043`).
+- **Comunicación Inter-Nodo (Gossip):** Para mantener el consenso, el balanceo del anillo y la replicación del clúster (bajo el esquema `NetworkTopologyStrategy`), los nodos sincronizan su estado interno a través de los puertos `7001`, `7002` y `7003`.
+- **Monitoreo y Telemetría:** Se definieron y expusieron los puertos JMX (`7201`, `7202`, `7203`) para permitir la supervisión externa del rendimiento de la máquina virtual de Java (JVM) de cada nodo.
+
+#### Persistencia y Ciclo de Vida del Dato
+
+Para evitar la volatilidad inherente a los contenedores y garantizar el resguardo de la información ante reinicios, se implementó un mapeo de volúmenes locales. Los directorios físicos del host (`./mount/cassandra-node-X`) están vinculados directamente a la ruta de almacenamiento de Cassandra (`/var/lib/cassandra`). Esto asegura que las _SSTables_ y el _CommitLog_ persistan físicamente en el disco.
+
+#### Tolerancia a Fallos Automatizada
+
+A nivel de orquestación, cada contenedor en el `docker-compose.yml` integra un _healthcheck_ nativo que ejecuta continuamente el comando `nodetool status`. Este mecanismo asegura que el clúster reconozca un nodo como funcional únicamente cuando su estado sea estrictamente `UN` (Up/Normal), aislando fallos y previniendo la escritura en particiones caídas.
+
+#### Diagrama de la Arquitectura
+
+![Cassandra-Cluster](cassandra-cluster.png)

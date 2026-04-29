@@ -101,14 +101,50 @@ El procesamiento de datos provenientes de redes sociales en tiempo real a travé
 
 - Uso de la información: Dado que el proyecto busca transformar "eventos crudos" en "información estratégica", existe la responsabilidad ética de no utilizar estos datos para fines de vigilancia o manipulación de opinión pública, limitándose estrictamente al análisis académico y de negocio propuesto.
 
-## 2. Infraestructura y Configuración
+## Implementación de la capa de ingesta
 
-### Configuración de la capa de ingesta
-Para gestionar el flujo masivo y continuo de datos proveniente de Jetstream, se ha seleccionado Apache Cassandra como el motor de base de datos NoSQL principal para la capa de ingesta y operativa.
+Para la captura y almacenamiento de datos del stream, se desarrolló un consumidor asíncrono en Python que actúa como puente entre el WebSocket público y nuestro clúster distribuido.
 
-Debido a que Apache Cassandra es tiene una arquitectura descentralizada y debido a que todos los nodos del clúster tienen el mismo rol y responsabilidades, así como gracias a su funcionalidad nativa de replicación entonces los datos consumidos se replican automáticamente en múltiples nodos lo que garantiza la persistencia y la disponibilidad de los datos. Cassandra no requiere configuración manuala para sharding, permitiendo un escalado horizontal. Finalmente, gracias a que cassandra hace un registro secuencial de los datos es capaz de procesar la gran cantidad de eventos JSON por segundo sin "bottlenecks"
+### Estado de Verdad Operativa
 
-### Justificación del Teorema CAP
+Se seleccionó **Apache Cassandra** como el stage de verdad operativa debido a su arquitectura orientada a escrituras últra rápidas. Se diseñó una tabla optimizada para esto:
 
-Basándonos en el teorema CAP, la infraestructura se ha diseñado como un sistema AP, priorizando la Disponibilidad (A) y la Tolerancia a particiones (P). Debido a que las caídas de red o de nodos son inevitables en entornos distribuidos, la tolerancia a particiones permite que el sistema aísle los fallos y siga operando. Asimismo, gracias a la prioridad en la disponibilidad, el clúster asegura que la base de datos siempre esté abierta para aceptar la incesante escritura de operaciones (create, update, delete) de Jetstream, evitando la pérdida de registros. Finalmente, al operar bajo este modelo, se asume una consistencia eventual, lo cual representa un compromiso técnico ideal para este proyecto, ya que un micro-retraso en la sincronización de lectura es preferible a rechazar datos nuevos durante la fase de ingesta.
+```sql
+CREATE TABLE IF NOT EXISTS jetstream_data.events (
+    collection text,
+    time_us bigint,
+    did text,
+    kind text,
+    operation text,
+    rkey text,
+    record text,
+    PRIMARY KEY ((collection), time_us, did)
+) WITH CLUSTERING ORDER BY (time_us DESC);
+```
 
+La llave de partición por `collection` garantiza una distribución equitativa de la carga de escritura entre los nodos del clúster, ya que los eventos de cada tipo de colección se distribuyen aleatoriamente entre los nodos. Mientras que el ordenamiento por `time_us DESC` permite consultas puntuales sobre el estado actual de los eventos (ej. "los últimos 10 follows") con latencia mínima. Para preservar el polimorfismo de los eventos de Bluesky, el payload completo se almacena como un texto crudo JSON en la columna `record`, delegando su transformación a la capa analítica.
+
+### Garantía de Caudal y Pruebas de carga
+
+Para soportar el volumen de entrada sin pérdida de mensajes ni saturación de red, se implementó una estrategia de **Micro-Batching** y **Concurrencia**:
+
+1. Control de Flujo: Para mantener una carga estable y realista en un entorno local distribuido, el consumidor se suscribió específicamente a los eventos `app.bsky.graph.follow` y `app.bsky.graph.block`, garantizando un caudal promedio de ~25 eventos por segundo (cumpliendo y superando el requerimiento mínimo del proyecto).
+2. Inserción Concurrente: El script no inserta registro por registro, lo cual sería un cuello de botella. Acumula los eventos en memoria y utiliza el método `execute_concurrent` del driver de DataStax para inyectar bloques (batches) directamente a los nodos de Cassandra de manera no bloqueante.
+
+### Resiliencia y Alta Disponibilidad
+
+El sistema está diseñado para tolerar fallos en dos frentes principales:
+
+- **Resiliencia en la Red (Consumidor):** El script asíncrono incluye un mecanismo de Exponential Backoff (`asyncio.sleep`). Si se pierde la conexión con el WebSocket de Jetstream o hay un micro-corte en la VPN, el sistema intercepta la excepción, espera un intervalo creciente de segundos y se reconecta automáticamente sin detener la ejecución ni perder el hilo del event loop.
+
+- **Resiliencia en el Almacenamiento (Base de Datos):** El clúster de Cassandra consta de 3 nodos desplegados con un Replication Factor de 3 (`NetworkTopologyStrategy`). Basado en el Teorema CAP (priorizando AP), si uno de los nodos de la VPN cae, el clúster sigue aceptando todas las escrituras sin pérdida de información (Eventual Consistency).
+
+### Ejecución y Seguridad
+
+Cumpliendo con las directrices de control de accesos, las credenciales del clúster y los endpoints de la VPN no se exponen en el código fuente. Se inyectan en tiempo de ejecución mediante la librería `python-dotenv`.
+
+**Para ejecutar el consumidor:**
+
+1. Crear un archivo `.env` en la raíz basado en el `.env.example`
+2. Activar el entorno virtual e instalar dependencias (`pip install -r requirements.txt`)
+3. Ejecutar el orquestador `python proyecto_ingesta.ipynb` (o desde el notebook proporcionado).

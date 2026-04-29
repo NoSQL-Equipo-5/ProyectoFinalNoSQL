@@ -104,7 +104,7 @@ El procesamiento de datos provenientes de redes sociales en tiempo real a travé
 
 La arquitectura base del proyecto se despliega mediante Docker Compose, conformando un clúster distribuido de Apache Cassandra de 3 nodos para garantizar alta disponibilidad, balanceo de carga y tolerancia a fallos.
 
-#### Topología de Red y Conectividad (VPN)
+### Topología de Red y Conectividad (VPN)
 
 Para asegurar un acceso estable y simular un entorno controlado, los contenedores exponen sus servicios a través de una IP fija proveída por una VPN (`10.15.20.24`). El tráfico y la comunicación se segmentaron estratégicamente en tres capas:
 
@@ -112,15 +112,15 @@ Para asegurar un acceso estable y simular un entorno controlado, los contenedore
 - **Comunicación Inter-Nodo (Gossip):** Para mantener el consenso, el balanceo del anillo y la replicación del clúster (bajo el esquema `NetworkTopologyStrategy`), los nodos sincronizan su estado interno a través de los puertos `7001`, `7002` y `7003`.
 - **Monitoreo y Telemetría:** Se definieron y expusieron los puertos JMX (`7201`, `7202`, `7203`) para permitir la supervisión externa del rendimiento de la máquina virtual de Java (JVM) de cada nodo.
 
-#### Persistencia y Ciclo de Vida del Dato
+### Persistencia y Ciclo de Vida del Dato
 
 Para evitar la volatilidad inherente a los contenedores y garantizar el resguardo de la información ante reinicios, se implementó un mapeo de volúmenes locales. Los directorios físicos del host (`./mount/cassandra-node-X`) están vinculados directamente a la ruta de almacenamiento de Cassandra (`/var/lib/cassandra`). Esto asegura que las _SSTables_ y el _CommitLog_ persistan físicamente en el disco.
 
-#### Tolerancia a Fallos Automatizada
+### Tolerancia a Fallos Automatizada
 
 A nivel de orquestación, cada contenedor en el `docker-compose.yml` integra un _healthcheck_ nativo que ejecuta continuamente el comando `nodetool status`. Este mecanismo asegura que el clúster reconozca un nodo como funcional únicamente cuando su estado sea estrictamente `UN` (Up/Normal), aislando fallos y previniendo la escritura en particiones caídas.
 
-#### Diagrama de la Arquitectura
+### Diagrama de la Arquitectura
 
 ![Cassandra-Cluster](cassandra-cluster.png)
 
@@ -170,13 +170,13 @@ Cumpliendo con las directrices de control de accesos, las credenciales del clús
 
 1. Crear un archivo `.env` en la raíz basado en el `.env.example`
 2. Activar el entorno virtual e instalar dependencias (`pip install -r requirements.txt`)
-3. Ejecutar el orquestador `python proyecto_ingesta.ipynb` (o desde el notebook proporcionado).
+3. Ejecutar el orquestador `proyecto_ingesta.ipynb`.
 
 ## 4. Implementación de la Capa de Procesamiento (OLAP)
 
 Esta fase constituye el núcleo de transformación del proyecto, donde los eventos capturados en la capa de ingesta son procesados para convertirlos en activos de información estratégica. Se implementó una arquitectura de procesamiento en memoria utilizando **Apache Spark (PySpark v3.5.1)** bajo un enfoque de procesamiento por lotes (_batch processing_).
 
-#### Motor de Procesamiento y Conectividad
+### Motor de Procesamiento y Conectividad
 
 Se seleccionó Spark debido a su capacidad de cómputo distribuido y su integración nativa con Apache Cassandra. La conexión se estableció mediante el `spark-cassandra-connector`, permitiendo que Spark actúe como una capa analítica desacoplada de la capa operativa.
 
@@ -184,7 +184,7 @@ Se seleccionó Spark debido a su capacidad de cómputo distribuido y su integrac
 - **Conector:** `com.datastax.spark:spark-cassandra-connector_2.12:3.5.0`.
 - **Estrategia de Carga:** Lectura paralela de la tabla `events` desde el clúster de Cassandra a través de la interfaz de la VPN corporativa.
 
-#### Etapa 4.1: Limpieza y Normalización de Datos
+### Etapa 4.1: Limpieza y Normalización de Datos
 
 El primer _job_ de Spark se encarga de estructurar el polimorfismo de los datos crudos. Dado que los eventos de Jetstream se almacenan como cadenas JSON en la columna `record` para no perder información, se aplicaron las siguientes transformaciones:
 
@@ -192,7 +192,7 @@ El primer _job_ de Spark se encarga de estructurar el polimorfismo de los datos 
 - **Casteo Temporal:** Conversión de marcas de tiempo en microsegundos (`time_us`) a objetos `timestamp` de Spark para habilitar análisis de series de tiempo.
 - **Filtrado de Integridad:** Identificación y manejo de registros con valores nulos (típicos en operaciones de borrado) para evitar sesgos en el conteo analítico.
 
-#### Etapa 4.2: Enriquecimiento mediante Resolución de Identidades
+### Etapa 4.2: Enriquecimiento mediante Resolución de Identidades
 
 Una de las mayores aportaciones técnicas de esta capa es el **Enriquecimiento Dinámico**. Los datos crudos solo contienen identificadores crípticos (DIDs). Para añadir contexto de negocio real, se desarrolló una función de usuario definida (UDF) que:
 
@@ -201,13 +201,13 @@ Una de las mayores aportaciones técnicas de esta capa es el **Enriquecimiento D
 3.  Resuelve el `did` a un `handle` legible (ej. `@usuario.bsky.social`).
 4.  Implementa un mecanismo de caché en memoria para optimizar los tiempos de ejecución y respetar los límites de tasa (_rate limits_) de la API externa.
 
-#### Etapa 4.3: Lógica de Negocio y Estructuración Final
+### Etapa 4.3: Lógica de Negocio y Estructuración Final
 
 Finalmente, los datos enriquecidos se consolidan en un DataFrame estructurado que sirve como base para la toma de decisiones. Esta transformación permite pasar de un "evento crudo" a una "información estratégica", facilitando consultas complejas como el cálculo de centralidad de red (quién es el actor más influyente) y la detección de patrones de comportamiento (proporción de bloqueos vs. seguimientos).
 
 ### Visualización del Flujo de Procesamiento (ETL)
 
-![Data Pipeline](data_pipeline.png)
+<img src="data_pipeline.png" height="400" alt="Data Pipeline">
 
 ## 5. Análisis de Resultados
 

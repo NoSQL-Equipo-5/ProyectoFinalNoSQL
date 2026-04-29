@@ -100,7 +100,31 @@ El procesamiento de datos provenientes de redes sociales en tiempo real a travé
 
 - Uso de la información: Dado que el proyecto busca transformar "eventos crudos" en "información estratégica", existe la responsabilidad ética de no utilizar estos datos para fines de vigilancia o manipulación de opinión pública, limitándose estrictamente al análisis académico y de negocio propuesto.
 
-## Implementación de la capa de ingesta
+## 2. Infraestructura y Configuración
+
+La arquitectura base del proyecto se despliega mediante Docker Compose, conformando un clúster distribuido de Apache Cassandra de 3 nodos para garantizar alta disponibilidad, balanceo de carga y tolerancia a fallos.
+
+#### Topología de Red y Conectividad (VPN)
+
+Para asegurar un acceso estable y simular un entorno controlado, los contenedores exponen sus servicios a través de una IP fija proveída por una VPN (`10.15.20.24`). El tráfico y la comunicación se segmentaron estratégicamente en tres capas:
+
+- **Comunicación Cliente-Nodo (RPC):** El script consumidor (escrito en Python) interactúa de forma asíncrona y concurrente con los nodos a través de los puertos de transporte nativo (`9041`, `9042` y `9043`).
+- **Comunicación Inter-Nodo (Gossip):** Para mantener el consenso, el balanceo del anillo y la replicación del clúster (bajo el esquema `NetworkTopologyStrategy`), los nodos sincronizan su estado interno a través de los puertos `7001`, `7002` y `7003`.
+- **Monitoreo y Telemetría:** Se definieron y expusieron los puertos JMX (`7201`, `7202`, `7203`) para permitir la supervisión externa del rendimiento de la máquina virtual de Java (JVM) de cada nodo.
+
+#### Persistencia y Ciclo de Vida del Dato
+
+Para evitar la volatilidad inherente a los contenedores y garantizar el resguardo de la información ante reinicios, se implementó un mapeo de volúmenes locales. Los directorios físicos del host (`./mount/cassandra-node-X`) están vinculados directamente a la ruta de almacenamiento de Cassandra (`/var/lib/cassandra`). Esto asegura que las _SSTables_ y el _CommitLog_ persistan físicamente en el disco.
+
+#### Tolerancia a Fallos Automatizada
+
+A nivel de orquestación, cada contenedor en el `docker-compose.yml` integra un _healthcheck_ nativo que ejecuta continuamente el comando `nodetool status`. Este mecanismo asegura que el clúster reconozca un nodo como funcional únicamente cuando su estado sea estrictamente `UN` (Up/Normal), aislando fallos y previniendo la escritura en particiones caídas.
+
+#### Diagrama de la Arquitectura
+
+![Cassandra-Cluster](cassandra-cluster.png)
+
+## 3. Implementación de la capa de ingesta
 
 Para la captura y almacenamiento de datos del stream, se desarrolló un consumidor asíncrono en Python que actúa como puente entre el WebSocket público y nuestro clúster distribuido.
 
@@ -148,26 +172,89 @@ Cumpliendo con las directrices de control de accesos, las credenciales del clús
 2. Activar el entorno virtual e instalar dependencias (`pip install -r requirements.txt`)
 3. Ejecutar el orquestador `python proyecto_ingesta.ipynb` (o desde el notebook proporcionado).
 
-### Infraestructura y Configuración
+## 4. Implementación de la Capa de Procesamiento (OLAP)
 
-La arquitectura base del proyecto se despliega mediante Docker Compose, conformando un clúster distribuido de Apache Cassandra de 3 nodos para garantizar alta disponibilidad, balanceo de carga y tolerancia a fallos.
+Esta fase constituye el núcleo de transformación del proyecto, donde los eventos capturados en la capa de ingesta son procesados para convertirlos en activos de información estratégica. Se implementó una arquitectura de procesamiento en memoria utilizando **Apache Spark (PySpark v3.5.1)** bajo un enfoque de procesamiento por lotes (_batch processing_).
 
-#### Topología de Red y Conectividad (VPN)
+#### Motor de Procesamiento y Conectividad
 
-Para asegurar un acceso estable y simular un entorno controlado, los contenedores exponen sus servicios a través de una IP fija proveída por una VPN (`10.15.20.24`). El tráfico y la comunicación se segmentaron estratégicamente en tres capas:
+Se seleccionó Spark debido a su capacidad de cómputo distribuido y su integración nativa con Apache Cassandra. La conexión se estableció mediante el `spark-cassandra-connector`, permitiendo que Spark actúe como una capa analítica desacoplada de la capa operativa.
 
-- **Comunicación Cliente-Nodo (RPC):** El script consumidor (escrito en Python) interactúa de forma asíncrona y concurrente con los nodos a través de los puertos de transporte nativo (`9041`, `9042` y `9043`).
-- **Comunicación Inter-Nodo (Gossip):** Para mantener el consenso, el balanceo del anillo y la replicación del clúster (bajo el esquema `NetworkTopologyStrategy`), los nodos sincronizan su estado interno a través de los puertos `7001`, `7002` y `7003`.
-- **Monitoreo y Telemetría:** Se definieron y expusieron los puertos JMX (`7201`, `7202`, `7203`) para permitir la supervisión externa del rendimiento de la máquina virtual de Java (JVM) de cada nodo.
+- **Entorno:** Python 3.12 ejecutándose sobre Java 17 (OpenJDK).
+- **Conector:** `com.datastax.spark:spark-cassandra-connector_2.12:3.5.0`.
+- **Estrategia de Carga:** Lectura paralela de la tabla `events` desde el clúster de Cassandra a través de la interfaz de la VPN corporativa.
 
-#### Persistencia y Ciclo de Vida del Dato
+#### Etapa 4.1: Limpieza y Normalización de Datos
 
-Para evitar la volatilidad inherente a los contenedores y garantizar el resguardo de la información ante reinicios, se implementó un mapeo de volúmenes locales. Los directorios físicos del host (`./mount/cassandra-node-X`) están vinculados directamente a la ruta de almacenamiento de Cassandra (`/var/lib/cassandra`). Esto asegura que las _SSTables_ y el _CommitLog_ persistan físicamente en el disco.
+El primer _job_ de Spark se encarga de estructurar el polimorfismo de los datos crudos. Dado que los eventos de Jetstream se almacenan como cadenas JSON en la columna `record` para no perder información, se aplicaron las siguientes transformaciones:
 
-#### Tolerancia a Fallos Automatizada
+- **Desempaquetado (Parsing):** Extracción selectiva de atributos (ej. `subject_did`) desde el payload JSON.
+- **Casteo Temporal:** Conversión de marcas de tiempo en microsegundos (`time_us`) a objetos `timestamp` de Spark para habilitar análisis de series de tiempo.
+- **Filtrado de Integridad:** Identificación y manejo de registros con valores nulos (típicos en operaciones de borrado) para evitar sesgos en el conteo analítico.
 
-A nivel de orquestación, cada contenedor en el `docker-compose.yml` integra un _healthcheck_ nativo que ejecuta continuamente el comando `nodetool status`. Este mecanismo asegura que el clúster reconozca un nodo como funcional únicamente cuando su estado sea estrictamente `UN` (Up/Normal), aislando fallos y previniendo la escritura en particiones caídas.
+#### Etapa 4.2: Enriquecimiento mediante Resolución de Identidades
 
-#### Diagrama de la Arquitectura
+Una de las mayores aportaciones técnicas de esta capa es el **Enriquecimiento Dinámico**. Los datos crudos solo contienen identificadores crípticos (DIDs). Para añadir contexto de negocio real, se desarrolló una función de usuario definida (UDF) que:
 
-![Cassandra-Cluster](cassandra-cluster.png)
+1.  Intercepta cada `did` único en el flujo de procesamiento.
+2.  Realiza peticiones asíncronas a la API pública de **AT Protocol** (`com.atproto.identity.resolveIdentity`).
+3.  Resuelve el `did` a un `handle` legible (ej. `@usuario.bsky.social`).
+4.  Implementa un mecanismo de caché en memoria para optimizar los tiempos de ejecución y respetar los límites de tasa (_rate limits_) de la API externa.
+
+#### Etapa 4.3: Lógica de Negocio y Estructuración Final
+
+Finalmente, los datos enriquecidos se consolidan en un DataFrame estructurado que sirve como base para la toma de decisiones. Esta transformación permite pasar de un "evento crudo" a una "información estratégica", facilitando consultas complejas como el cálculo de centralidad de red (quién es el actor más influyente) y la detección de patrones de comportamiento (proporción de bloqueos vs. seguimientos).
+
+### Visualización del Flujo de Procesamiento (ETL)
+
+![Data Pipeline](data_pipeline.png)
+
+## 5. Análisis de Resultados
+
+En esta etapa final, se transformaron los activos de datos almacenados en la capa de ingesta en información estratégica mediante el uso de **Apache Spark (PySpark)**. Se ejecutaron procesos de limpieza, normalización y enriquecimiento para responder a preguntas de negocio sobre el comportamiento de la red de Bluesky.
+
+### Trazabilidad y Evolución del Dato
+
+El ciclo de vida del dato en este proyecto demuestra una transición clara de lo operativo a lo analítico:
+
+1.  **Evento Crudo (Ingesta):** Captura de un JSON polimórfico en Cassandra con identificadores crípticos (`did:plc...`)
+2.  **Dato Transformado (Procesamiento):** Extracción de atributos específicos (`subject`, `createdAt`), tipado de datos y manejo de nulos mediante PySpark.
+3.  **Información Enriquecida:** Resolución de identidades mediante la API de AT Protocol para sustituir DIDs por _handles_ legibles (`@usuario.bsky.social`)
+4.  **Información Estratégica:** Generación de métricas de centralidad y tendencias temporales para la toma de decisiones
+
+### Hallazgos e Interpretación Técnica
+
+#### 1. Composición de la Interacción Social
+
+Como se observa en la **Gráfica de Proporción**, la red mantiene una salud transaccional positiva:
+
+- **Follows (89.3%):** Representan la vasta mayoría del tráfico, indicando una fase de crecimiento y descubrimiento de contenido en el stream capturado.
+- **Blocks (10.7%):** Aunque son minoría, permiten identificar focos de fricción o actividad sospechosa (spam) que requieren moderación.
+
+![Gráfica de proporción](grafica_proporcion.png)
+
+#### 2. Dinámica Temporal del Stream
+
+La **Gráfica de Volumen por Minuto** revela un crecimiento sostenido en la tasa de eventos durante la captura.
+
+Se observa una correlación positiva entre el paso del tiempo y la densidad de eventos, lo que valida la escalabilidad de nuestra capa de ingesta: el sistema soportó picos de casi 200 eventos por minuto sin pérdida de mensajes ni degradación de latencia.
+
+![Gráfica de volumen por minuto](grafica_tendencia.png)
+
+#### 3. Análisis de Actores Clave (Out-Degree)
+
+Mediante la métrica de **Grado de Salida**, identificamos a los usuarios con mayor impacto en la generación de eventos.
+
+- El usuario con el DID `did:plc:o6jpzsl5657twes4i4zhjafk` lidera la actividad con 13 interacciones generadas en el periodo de muestra. Este tipo de análisis permite detectar cuentas de "curadores de contenido" o, en casos extremos, bots de automatización que saturan el caudal de la red.
+
+![Top Usuarios Activos](grafica_activos.png)
+
+### Consultas de Valor Ejecutadas
+
+Se implementaron 5 consultas complejas para extraer inteligencia de los datos:
+
+- **Agregación Temporal (Windows):** Conteo de eventos en ventanas de 1 minuto para detectar picos de tráfico.
+- **Centralidad de Salida (Out-Degree):** Ranking de los 10 actores más activos en la red.
+- **Centralidad de Entrada (In-Degree):** Identificación de las cuentas más seguidas o bloqueadas (Influencers vs. Outcasts).
+- **Análisis de Sentimiento Operacional:** Proporción comparativa entre acciones de vinculación (Follow) y ruptura (Block).
+- **Clasificación Particionada (Window Functions):** Uso de `row_number()` para identificar a los líderes de cada categoría de interacción de forma aislada.

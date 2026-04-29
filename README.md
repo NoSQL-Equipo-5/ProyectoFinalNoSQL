@@ -207,7 +207,7 @@ Finalmente, los datos enriquecidos se consolidan en un DataFrame estructurado qu
 
 ### Visualización del Flujo de Procesamiento (ETL)
 
-<img src="data_pipeline.png" height="400" alt="Data Pipeline">
+<img src="data_pipeline.png" width="700" alt="Data Pipeline">
 
 ## 5. Análisis de Resultados
 

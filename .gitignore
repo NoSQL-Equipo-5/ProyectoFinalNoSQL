@@ -1,2 +1,5 @@
 /proyecto
 .env
+.DS_Store
+mount/
+cassandra-cluster.docker-compose.yml
